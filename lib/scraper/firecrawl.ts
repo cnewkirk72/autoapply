@@ -8,8 +8,9 @@ import type { NormalizedJob } from "./types";
  * Takes a job posting URL, hits Firecrawl with a JSON Schema describing the
  * fields we want, and returns a NormalizedJob. Firecrawl uses an LLM under the
  * hood to extract structured data from arbitrary job board markup, so this
- * works across LinkedIn, Indeed, Greenhouse, Lever, etc. without per-site
- * parsers.
+ * works across Greenhouse, Lever, Ashby, Workable, etc. without per-site
+ * parsers. LinkedIn / Indeed / Glassdoor are explicitly refused upstream
+ * by Firecrawl, so we pre-filter those URLs to save credits.
  *
  * Docs: https://docs.firecrawl.dev/features/extract
  */
@@ -121,6 +122,14 @@ async function firecrawlScrape(url: string): Promise<ExtractedJob | null> {
   }
 }
 
+// Domains Firecrawl is known to refuse with a 403. We pre-filter so we
+// don't waste credits and don't pollute the logs with the same error.
+const FIRECRAWL_BLOCKED_HOSTS = ["linkedin.com", "indeed.com", "glassdoor.com"];
+
+function isFirecrawlSupported(url: string): boolean {
+  return !FIRECRAWL_BLOCKED_HOSTS.some((host) => url.includes(host));
+}
+
 /**
  * Extract structured jobs from a list of URLs in parallel batches.
  * Concurrency capped to avoid rate limits.
@@ -129,10 +138,18 @@ export async function firecrawlExtractJobs(
   urls: string[],
   concurrency = 5,
 ): Promise<NormalizedJob[]> {
+  const supported = urls.filter(isFirecrawlSupported);
+  const skipped = urls.length - supported.length;
+  if (skipped > 0) {
+    console.log(
+      `[firecrawl] skipping ${skipped} URL(s) on blocked hosts (LinkedIn/Indeed/Glassdoor)`,
+    );
+  }
+
   const out: NormalizedJob[] = [];
 
-  for (let i = 0; i < urls.length; i += concurrency) {
-    const batch = urls.slice(i, i + concurrency);
+  for (let i = 0; i < supported.length; i += concurrency) {
+    const batch = supported.slice(i, i + concurrency);
     const results = await Promise.allSettled(
       batch.map(async (url) => {
         const data = await firecrawlScrape(url);

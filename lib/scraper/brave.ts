@@ -1,28 +1,43 @@
-import type { ScrapeQuery } from "./types";
+import type { JobSource, ScrapeQuery } from "./types";
 
 /**
  * Brave Search API adapter — discovery layer.
  *
- * Returns a list of job posting URLs across LinkedIn, Indeed, Greenhouse,
- * Lever, Wellfound, Ashby, etc. The actual job fields (title, company,
- * description, salary) are extracted in the next stage by Firecrawl.
+ * Returns a list of job posting URLs across various ATS systems
+ * (Greenhouse, Lever, Ashby, Workable, etc). The actual job fields
+ * (title, company, description, salary) are extracted in the next
+ * stage by Firecrawl.
  *
  * Strategy: one Brave query per (role, site) combo. This is more reliable
  * than `(site:a OR site:b ...)` because Brave's parenthesized OR over
- * multiple site: filters tends to return empty result sets. With 6 sites
- * and 1-3 roles, we hit ~6-18 queries per refresh — well within the
+ * multiple site: filters tends to return empty result sets. With ~10 sites
+ * and 1-3 roles, we hit ~10-30 queries per refresh — well within the
  * 2000/mo free tier.
  *
  * Docs: https://api.search.brave.com/app/documentation/web-search
  */
 
+/**
+ * NB: LinkedIn and Indeed are intentionally excluded.
+ *  - LinkedIn: Firecrawl explicitly refuses (403 "we do not support this site"),
+ *    and direct scraping requires stealth + proxy rotation we don't have.
+ *  - Indeed: blocks Google's crawler entirely, so Brave's index is empty.
+ *
+ * What remains is ATS-hosted job pages, which are publicly indexable and
+ * scrape cleanly through Firecrawl. Most real hiring companies post to
+ * one of these, and recruiters just cross-post to LinkedIn anyway.
+ */
 const JOB_SITES = [
-  "linkedin.com/jobs/view",
-  "indeed.com/viewjob",
   "boards.greenhouse.io",
   "jobs.lever.co",
-  "wellfound.com/jobs",
   "jobs.ashbyhq.com",
+  "wellfound.com/jobs",
+  "apply.workable.com",
+  "jobs.smartrecruiters.com",
+  "jobs.jobvite.com",
+  "recruitee.com/o",
+  "bamboohr.com/jobs",
+  "breezy.hr",
 ];
 
 interface BraveResult {
@@ -112,19 +127,13 @@ export async function braveSearchJobUrls(
 }
 
 /** Map a URL back to its source label for the `jobs.source` column. */
-export function detectSourceFromUrl(url: string):
-  | "linkedin"
-  | "indeed"
-  | "greenhouse"
-  | "lever"
-  | "wellfound"
-  | "ashby"
-  | "other" {
+export function detectSourceFromUrl(url: string): JobSource {
   if (url.includes("linkedin.com")) return "linkedin";
   if (url.includes("indeed.com")) return "indeed";
   if (url.includes("greenhouse.io")) return "greenhouse";
   if (url.includes("lever.co")) return "lever";
-  if (url.includes("wellfound.com")) return "wellfound";
   if (url.includes("ashbyhq.com")) return "ashby";
+  if (url.includes("wellfound.com")) return "wellfound";
+  // Newer ATS sources fall under "other" until we widen the DB enum.
   return "other";
 }
