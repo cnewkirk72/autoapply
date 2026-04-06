@@ -1,10 +1,21 @@
+export type JobSource =
+  | "linkedin"
+  | "indeed"
+  | "greenhouse"
+  | "lever"
+  | "wellfound"
+  | "ashby"
+  | "google_jobs"
+  | "company"
+  | "other";
+
 export interface NormalizedJob {
   title: string;
   company: string;
   location?: string;
   salary_range?: string;
   remote_type: "remote" | "hybrid" | "onsite" | "unknown";
-  source: "google_jobs" | "linkedin" | "indeed" | "serpapi";
+  source: JobSource;
   source_url: string;
   posted_date?: string; // ISO date
   description_text: string;

@@ -1,33 +1,56 @@
-import { scrapeSerpApiGoogleJobs } from "./serpapi";
+import { braveSearchJobUrls } from "./brave";
+import { firecrawlExtractJobs } from "./firecrawl";
 import type { NormalizedJob, ScrapeQuery } from "./types";
 
 /**
- * Top-level scrape orchestrator.
+ * Top-level scrape orchestrator (Brave → Firecrawl pipeline).
  *
- * Phase 1 strategy: SerpAPI-first.
- * - Run SerpAPI Google Jobs for each query
- * - (Future) Try Playwright direct scrapes when PLAYWRIGHT_ENABLED=true
- * - Dedupe by (title|company|location)
+ * Stage 1 — Discovery (Brave Search API):
+ *   For each ScrapeQuery, hit Brave with a `site:` filter across known job
+ *   board domains. Returns ~20 URLs per query, deduped across queries.
+ *
+ * Stage 2 — Extraction (Firecrawl /v1/scrape with JSON Schema):
+ *   For each unique URL, Firecrawl scrapes the page and uses an LLM to
+ *   extract structured fields (title, company, location, salary, description,
+ *   posted_date) into a NormalizedJob.
+ *
+ * Stage 3 — Dedupe:
+ *   Across all extracted jobs, dedupe again on (title|company|location)
+ *   in case the same posting was found via multiple Brave queries.
  */
 export async function scrapeJobsForUser(
   queries: ScrapeQuery[],
 ): Promise<NormalizedJob[]> {
-  const all: NormalizedJob[] = [];
-  const seen = new Set<string>();
-
+  // ---- Stage 1: discovery ----
+  const urlSet = new Set<string>();
   for (const q of queries) {
-    const result = await scrapeSerpApiGoogleJobs(q);
-    if (result.blocked) {
-      console.warn(`[scraper] ${q.role}: SerpAPI blocked or unavailable`);
-    }
-    for (const job of result.jobs) {
-      if (seen.has(job.dedupe_key)) continue;
-      seen.add(job.dedupe_key);
-      all.push(job);
-    }
+    const urls = await braveSearchJobUrls(q);
+    for (const url of urls) urlSet.add(url);
   }
 
-  return all;
+  if (urlSet.size === 0) {
+    console.warn("[scraper] Brave returned 0 URLs. Check BRAVE_API_KEY or queries.");
+    return [];
+  }
+
+  console.log(`[scraper] Brave discovered ${urlSet.size} unique URLs`);
+
+  // ---- Stage 2: extraction ----
+  const jobs = await firecrawlExtractJobs([...urlSet], 5);
+
+  // ---- Stage 3: cross-source dedupe ----
+  const seen = new Set<string>();
+  const deduped: NormalizedJob[] = [];
+  for (const job of jobs) {
+    if (seen.has(job.dedupe_key)) continue;
+    seen.add(job.dedupe_key);
+    deduped.push(job);
+  }
+
+  console.log(
+    `[scraper] Firecrawl extracted ${jobs.length}, ${deduped.length} after dedupe`,
+  );
+  return deduped;
 }
 
 export type { NormalizedJob, ScrapeQuery };
