@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start",
+    "start": "next start -p ${PORT:-3000} -H 0.0.0.0",
     "lint": "next lint",
     "worker:scrape": "tsx workers/scrape-worker.ts",
     "db:types": "supabase gen types typescript --local > lib/supabase/types.ts"
