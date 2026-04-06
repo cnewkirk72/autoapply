@@ -3,15 +3,14 @@ import type { JobSource, ScrapeQuery } from "./types";
 /**
  * Brave Search API adapter — discovery layer.
  *
- * Returns a list of job posting URLs across various ATS systems
- * (Greenhouse, Lever, Ashby, Workable, etc). The actual job fields
- * (title, company, description, salary) are extracted in the next
- * stage by Firecrawl.
+ * Returns a list of job posting URLs across LinkedIn, Indeed, Greenhouse,
+ * Lever, Wellfound, Ashby, etc. The actual job fields (title, company,
+ * description, salary) are extracted in the next stage by Firecrawl.
  *
  * Strategy: one Brave query per (role, site) combo. This is more reliable
  * than `(site:a OR site:b ...)` because Brave's parenthesized OR over
- * multiple site: filters tends to return empty result sets. With ~10 sites
- * and 1-3 roles, we hit ~10-30 queries per refresh — well within the
+ * multiple site: filters tends to return empty result sets. With 6 sites
+ * and 1-3 roles, we hit ~6-18 queries per refresh — well within the
  * 2000/mo free tier.
  *
  * Docs: https://api.search.brave.com/app/documentation/web-search
@@ -39,6 +38,50 @@ const JOB_SITES = [
   "bamboohr.com/jobs",
   "breezy.hr",
 ];
+
+/**
+ * URL-shape filters — only accept URLs that look like individual job detail
+ * pages on each ATS. Without this, Brave happily returns careers landing
+ * pages, filter/search URLs, and embed widgets (e.g. bamboohr embed2.php),
+ * which Firecrawl can't extract and which waste credits + pollute logs.
+ *
+ * Each regex matches the canonical detail-page shape for that ATS.
+ */
+const JOB_DETAIL_PATTERNS: RegExp[] = [
+  // boards.greenhouse.io/{company}/jobs/{numeric_id}
+  /boards\.greenhouse\.io\/[^\/]+\/jobs\/\d+/i,
+  // jobs.lever.co/{company}/{uuid}
+  /jobs\.lever\.co\/[^\/]+\/[0-9a-f-]{20,}/i,
+  // jobs.ashbyhq.com/{company}/{uuid}
+  /jobs\.ashbyhq\.com\/[^\/]+\/[0-9a-f-]{20,}/i,
+  // wellfound.com/jobs/{numeric_id}-slug or /company/{slug}/jobs/{id}
+  /wellfound\.com\/jobs\/\d+/i,
+  /wellfound\.com\/company\/[^\/]+\/jobs\/\d+/i,
+  // apply.workable.com/{company}/j/{ALPHANUM_ID}
+  /apply\.workable\.com\/[^\/]+\/j\/[A-Z0-9]+/i,
+  // jobs.smartrecruiters.com/{company}/{numeric_id}-slug
+  /jobs\.smartrecruiters\.com\/[^\/]+\/\d{6,}/i,
+  // jobs.jobvite.com/{company}/job/{id}
+  /jobs\.jobvite\.com\/[^\/]+\/job\/[A-Za-z0-9_-]+/i,
+  // {company}.recruitee.com/o/{slug} or recruitee.com/o/{slug}
+  /recruitee\.com\/o\/[a-z0-9-]+/i,
+  // {company}.bamboohr.com/jobs/view.php?id={id} or /careers/{id}
+  /bamboohr\.com\/(jobs\/view\.php\?id=\d+|careers\/\d+)/i,
+  // {company}.breezy.hr/p/{uuid-slug}
+  /breezy\.hr\/p\/[a-f0-9]{8,}/i,
+];
+
+function isJobDetailUrl(url: string): boolean {
+  return JOB_DETAIL_PATTERNS.some((re) => re.test(url));
+}
+
+/**
+ * Hard cap on how many URLs we'll ever send to Firecrawl from a single scan.
+ * At ~$0.002/scrape, 40 URLs = ~$0.08 per refresh. Firecrawl also rate-limits
+ * aggressively on the free tier. If Brave finds more, we take the first N in
+ * role order so the user's top-priority roles always get scraped first.
+ */
+const MAX_URLS_PER_SCAN = 40;
 
 interface BraveResult {
   url?: string;
@@ -109,10 +152,13 @@ async function braveQuery(q: string, count: number): Promise<string[]> {
 export async function braveSearchJobUrls(
   query: ScrapeQuery,
 ): Promise<string[]> {
-  const perSiteCount = Math.max(5, Math.floor((query.limit ?? 30) / 2));
+  // Keep per-site count small — we'd rather have 5 high-quality detail URLs
+  // per site than 20 noisy ones that include careers landing pages.
+  const perSiteCount = Math.max(5, Math.min(query.limit ?? 7, 10));
   const role = query.role.trim();
   const location = query.location?.trim() ?? "";
   const seen = new Set<string>();
+  let rawTotal = 0;
 
   for (const site of JOB_SITES) {
     // Primary query: role + location (location is the only thing we quote,
@@ -130,15 +176,29 @@ export async function braveSearchJobUrls(
       urls = await braveQuery(fallback, perSiteCount);
     }
 
+    rawTotal += urls.length;
     for (const u of urls) {
-      if (JOB_SITES.some((s) => u.includes(s))) seen.add(u);
+      // Only keep URLs that match one of the ATS job-detail patterns.
+      if (isJobDetailUrl(u)) seen.add(u);
     }
   }
 
   console.log(
-    `[brave] role="${role}" location="${location}" → ${seen.size} unique job URLs across ${JOB_SITES.length} sites`,
+    `[brave] role="${role}" location="${location}" → ${seen.size}/${rawTotal} job-detail URLs across ${JOB_SITES.length} sites (after shape filter)`,
   );
   return [...seen];
+}
+
+/**
+ * Apply the global URL cap after all roles have been collected. Exported so
+ * the scraper orchestrator can call it once after combining per-role results.
+ */
+export function capJobUrls(urls: string[]): string[] {
+  if (urls.length <= MAX_URLS_PER_SCAN) return urls;
+  console.log(
+    `[brave] capping ${urls.length} URLs → ${MAX_URLS_PER_SCAN} (MAX_URLS_PER_SCAN)`,
+  );
+  return urls.slice(0, MAX_URLS_PER_SCAN);
 }
 
 /** Map a URL back to its source label for the `jobs.source` column. */
