@@ -1,8 +1,28 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 
+/**
+ * Resolve the *public* origin even when the app sits behind a proxy
+ * (Railway, Vercel, Fly, etc). `new URL(request.url).origin` reads the
+ * internal host header — which on Railway is "http://0.0.0.0:8080" — so
+ * we prefer NEXT_PUBLIC_SITE_URL, then x-forwarded-host, then fall back.
+ */
+function getPublicOrigin(request: Request): string {
+  const envUrl = process.env.NEXT_PUBLIC_SITE_URL;
+  if (envUrl) return envUrl.replace(/\/$/, "");
+
+  const fwdHost = request.headers.get("x-forwarded-host");
+  if (fwdHost) {
+    const fwdProto = request.headers.get("x-forwarded-proto") ?? "https";
+    return `${fwdProto}://${fwdHost}`;
+  }
+
+  return new URL(request.url).origin;
+}
+
 export async function GET(request: Request) {
-  const { searchParams, origin } = new URL(request.url);
+  const { searchParams } = new URL(request.url);
+  const origin = getPublicOrigin(request);
   const code = searchParams.get("code");
   const next = searchParams.get("next") ?? "/dashboard";
 
