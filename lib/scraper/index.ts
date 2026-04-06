@@ -1,4 +1,4 @@
-import { braveSearchJobUrls } from "./brave";
+import { braveSearchJobUrls, capJobUrls } from "./brave";
 import { firecrawlExtractJobs } from "./firecrawl";
 import type { NormalizedJob, ScrapeQuery } from "./types";
 
@@ -35,8 +35,12 @@ export async function scrapeJobsForUser(
 
   console.log(`[scraper] Brave discovered ${urlSet.size} unique URLs`);
 
+  // Apply global cap before extraction so we don't firehose Firecrawl
+  // (rate limits + per-scrape cost). See MAX_URLS_PER_SCAN in brave.ts.
+  const cappedUrls = capJobUrls([...urlSet]);
+
   // ---- Stage 2: extraction ----
-  const jobs = await firecrawlExtractJobs([...urlSet], 5);
+  const jobs = await firecrawlExtractJobs(cappedUrls, 5);
 
   // ---- Stage 3: cross-source dedupe ----
   const seen = new Set<string>();
