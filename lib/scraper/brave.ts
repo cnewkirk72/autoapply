@@ -101,27 +101,42 @@ async function braveQuery(q: string, count: number): Promise<string[]> {
 }
 
 /**
- * One Brave query per (role × location × site). Returns deduped URLs that
- * actually look like job postings on one of our target boards.
+ * One Brave query per (role × site), with a location-less fallback when the
+ * location-scoped query comes back empty. We deliberately do NOT exact-phrase
+ * the role: real job titles vary ("Lead, Marketing Data Science", "Senior
+ * Marketing Data Scientist", etc.), and exact-phrase matching kills recall.
  */
 export async function braveSearchJobUrls(
   query: ScrapeQuery,
 ): Promise<string[]> {
-  const perSiteCount = Math.max(3, Math.floor((query.limit ?? 20) / 3));
-  const locationPart = query.location ? ` "${query.location}"` : "";
+  const perSiteCount = Math.max(5, Math.floor((query.limit ?? 30) / 2));
+  const role = query.role.trim();
+  const location = query.location?.trim() ?? "";
   const seen = new Set<string>();
 
   for (const site of JOB_SITES) {
-    const q = `"${query.role}"${locationPart} jobs site:${site}`;
-    const urls = await braveQuery(q, perSiteCount);
+    // Primary query: role + location (location is the only thing we quote,
+    // and only if it's a multi-word string like "New York" or "San Francisco").
+    const locPart = location
+      ? ` ${location.includes(" ") ? `"${location}"` : location}`
+      : "";
+    const primary = `${role} jobs${locPart} site:${site}`;
+    let urls = await braveQuery(primary, perSiteCount);
+
+    // Fallback: drop the location filter if the location-scoped query is empty.
+    // Lots of ATS pages don't surface a city name in their indexable copy.
+    if (urls.length === 0 && location) {
+      const fallback = `${role} jobs site:${site}`;
+      urls = await braveQuery(fallback, perSiteCount);
+    }
+
     for (const u of urls) {
-      // Be lenient — any URL containing the site fragment counts.
       if (JOB_SITES.some((s) => u.includes(s))) seen.add(u);
     }
   }
 
   console.log(
-    `[brave] role="${query.role}" location="${query.location ?? ""}" → ${seen.size} unique job URLs across ${JOB_SITES.length} sites`,
+    `[brave] role="${role}" location="${location}" → ${seen.size} unique job URLs across ${JOB_SITES.length} sites`,
   );
   return [...seen];
 }
